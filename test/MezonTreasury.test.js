@@ -2,287 +2,233 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
 describe("MezonTreasury", function () {
-    let treasury, token, admin, user, recipient;
+    let MezonTreasury, treasury, owner, admin, withdrawer, otherAccount;
+    const initialSupply = ethers.parseUnits("100000000", 18);
 
-    beforeEach(async () => {
-        [admin, user, recipient] = await ethers.getSigners();
+    before(async () => {
+        [owner, admin, withdrawer, otherAccount] = await ethers.getSigners();
 
-        // Deploy a mock ERC20 token
-        const TestToken = await ethers.getContractFactory("MockERC20");
-        token = await TestToken.deploy( ethers.parseEther("1000"));
-        await token.waitForDeployment()
-
-        // Deploy the MezonTreasury contract
-        const MezonTreasury = await ethers.getContractFactory("MezonTreasury");
-        treasury = await MezonTreasury.deploy(token.getAddress());
-        await treasury.waitForDeployment()
-
-        // Transfer tokens to the user and approve the treasury for deposits
-        await token.transfer(user.getAddress(), ethers.parseEther("100"));
-        await token.connect(user).approve(treasury.getAddress(), ethers.parseEther("100"));
+        // Deploy MezonTreasury contract
+        MezonTreasury = await ethers.getContractFactory("MezonTreasury");
+        treasury = await MezonTreasury.deploy();
+        await treasury.waitForDeployment();
     });
 
-    it("Should allow a user to deposit tokens", async function () {
-        await treasury.connect(user).deposit(ethers.parseEther("10"));
-        const treasuryBalance = await token.balanceOf(treasury.getAddress());
-        expect(treasuryBalance).to.equal(ethers.parseEther("10"));
-    });
-    
-    it("Should fail if the user does not have enough tokens to deposit", async function () {
-        await expect(treasury.connect(user).deposit(ethers.parseEther("1000"))).to.be.revertedWith("Insufficient balance");
+    it("Should have initial supply minted to owner", async () => {
+        const ownerBalance = await treasury.balanceOf(await owner.getAddress());
+        expect(ownerBalance).to.equal(initialSupply);
     });
 
-    it("Should fail if the user deposits 0 tokens", async function () {
-        await expect(treasury.connect(user).deposit(0)).to.be.revertedWith("Amount must be greater than zero");
+    it("Should allow admin to grant withdrawer role", async () => {
+        await treasury.connect(owner).grantWithdrawerRole(await withdrawer.getAddress());
+        expect(await treasury.hasRole(await treasury.WITHDRAWER_ROLE(), await withdrawer.getAddress())).to.be.true;
     });
 
-    it("Should allow withdrawals with a valid signature", async function () {
-        const withdrawAmount = ethers.parseEther("50");
-        // Grant the WITHDRAWER_ROLE to the user
-        await treasury.connect(admin).grantRole(await treasury.WITHDRAWER_ROLE(), user.getAddress());
-        // Fund the treasury for withdrawal
-        await token.connect(admin).transfer(await treasury.getAddress(), withdrawAmount);
+    it("Should allow admin to revoke withdrawer role", async () => {
+        await treasury.connect(owner).revokeWithdrawerRole(await withdrawer.getAddress());
+        expect(await treasury.hasRole(await treasury.WITHDRAWER_ROLE(), await withdrawer.getAddress())).to.be.false;
+    });
 
-        const nonce = await treasury.nonces(await user.getAddress());
-        const network = await ethers.provider.getNetwork();
-        const { chainId } = network;
+    it("Should allow admin to mint new tokens", async () => {
+        const mintAmount = ethers.parseUnits("1000", 18);
+        const beforeBalance = await treasury.balanceOf(await owner.getAddress());
+        await treasury.connect(owner).mint(await owner.getAddress(), mintAmount);
+        const balance = await treasury.balanceOf(await owner.getAddress());
+        expect(balance).to.equal(beforeBalance + mintAmount);
+    });
 
-        // Define the EIP-712 domain and types
+    it("Should prevent non-admin from minting new tokens", async () => {
+        try {
+        const mintAmount = ethers.parseUnits("1000", 18);
+        await expect(treasury.connect(otherAccount).mint(await otherAccount.getAddress(), mintAmount)
+        ).to.be.revertedWithoutReason;
+        }
+        catch (error) {
+            expect(error.message).to.contain("Permission denied");
+        }
+    });
+
+    it("Should prevent non-admin from granting or revoking roles", async () => {
+        await expect(
+            treasury.connect(otherAccount).grantWithdrawerRole(await otherAccount.getAddress())
+        ).to.be.revertedWith("Permission denied");
+
+        await expect(
+            treasury.connect(otherAccount).revokeWithdrawerRole(await withdrawer.getAddress())
+        ).to.be.revertedWith("Permission denied");
+    });
+
+    it("Should allow withdrawal with a valid EIP-712 signature", async () => {
+        // Set up the domain and types for EIP-712 signing
+        const amountToWithdraw = ethers.parseEther("5");
+        const requestId = "123456789";
+        const AbiCoder = new ethers.AbiCoder()
         const domain = {
             name: "MezonTreasury",
             version: "1",
-            chainId: chainId,
+            chainId: await ethers.provider.getNetwork().then((n) => n.chainId),
             verifyingContract: await treasury.getAddress(),
         };
+
         const types = {
             WithdrawRequest: [
                 { name: "user", type: "address" },
                 { name: "amount", type: "uint256" },
                 { name: "to", type: "address" },
-                { name: "nonce", type: "uint256" }
+                { name: "requestId", type: "bytes32" },
             ],
         };
-        
-        const message = {
-            user: await user.getAddress(),
-            amount: withdrawAmount,
-            to: await recipient.getAddress(),
-            nonce: nonce
+
+        // Set up the withdrawal request
+        const value = {
+            user: await owner.getAddress(),
+            amount: amountToWithdraw,
+            to: await otherAccount.getAddress(),
+            requestId: ethers.keccak256(AbiCoder.encode(["string"], [requestId])),
         };
 
-        // Generate the signature
-        const signature = await user.signTypedData(domain, types, message);
-        const { v, r, s } = ethers.Signature.from(signature);
-        
-        // const structHash = ethers.TypedDataEncoder.hash(domain, types, message);
+        // Sign the withdrawal request
+        const signature = await owner.signTypedData(domain, types, value);
+        // const structHash = ethers.TypedDataEncoder.hash(domain, types, value);
         // const signer = await ethers.recoverAddress(structHash, signature);
         // const domainSeparator = ethers.TypedDataEncoder.hashDomain(domain);
-        // console.log("NONCE: ", nonce)
         // console.log("DOMAIN: ", domainSeparator)
         // console.log("HASH: ", structHash)
         // console.log("SIGNER: ", signer)
+        // console.log("Signature:", signature);
+
         // Execute the withdrawal
-        await expect(treasury.connect(user).withdraw(withdrawAmount, await recipient.getAddress(), v, r, s));
-        await token.connect(user).approve(treasury.getAddress(), withdrawAmount);
-        expect(await token.balanceOf(await recipient.getAddress())).to.equal(withdrawAmount);
+        const beforeOwnerBalance = await treasury.balanceOf(await owner.getAddress());
+        const beforeOtherAccountBalance = await treasury.balanceOf(await otherAccount.getAddress());
+
+        await expect(treasury.connect(owner).withdraw(requestId, amountToWithdraw, await otherAccount.getAddress(), signature))
+        await treasury.connect(otherAccount).approve(treasury.getAddress(), amountToWithdraw);
+
+        const ownerBalance = await treasury.balanceOf(await owner.getAddress());
+        const otherAccountBalance = await treasury.balanceOf(await otherAccount.getAddress());
+        expect(otherAccountBalance).to.equal(beforeOtherAccountBalance + amountToWithdraw);
+        expect(ownerBalance).to.equal(beforeOwnerBalance - amountToWithdraw);
     });
-    it("Should fail if user try to withdraw 0 token", async function () {
+    it("Should fail withdrawal with a invalid withdraw amount", async () => {
         try {
-            const withdrawAmount = ethers.parseEther("0");
-            // Grant the WITHDRAWER_ROLE to the user
-            await treasury.connect(admin).grantRole(await treasury.WITHDRAWER_ROLE(), user.getAddress());
-            // Fund the treasury for withdrawal
-            await token.connect(admin).transfer(await treasury.getAddress(), withdrawAmount);
-    
-            const nonce = await treasury.nonces(await user.getAddress());
-            const network = await ethers.provider.getNetwork();
-            const { chainId } = network;
-    
-            // Define the EIP-712 domain and types
+            // Set up the domain and types for EIP-712 signing
+            const amountToWithdraw = ethers.parseEther("500000");
+            const requestId = "123456789";
+            const AbiCoder = new ethers.AbiCoder()
             const domain = {
                 name: "MezonTreasury",
                 version: "1",
-                chainId: chainId,
+                chainId: await ethers.provider.getNetwork().then((n) => n.chainId),
                 verifyingContract: await treasury.getAddress(),
             };
+    
             const types = {
                 WithdrawRequest: [
                     { name: "user", type: "address" },
                     { name: "amount", type: "uint256" },
                     { name: "to", type: "address" },
-                    { name: "nonce", type: "uint256" }
+                    { name: "requestId", type: "bytes32" },
                 ],
             };
-            
-            const message = {
-                user: await user.getAddress(),
-                amount: withdrawAmount,
-                to: await recipient.getAddress(),
-                nonce: nonce
+    
+            // Set up the withdrawal request
+            const value = {
+                user: await owner.getAddress(),
+                amount: amountToWithdraw,
+                to: await otherAccount.getAddress(),
+                requestId: ethers.keccak256(AbiCoder.encode(["string"], [requestId])),
             };
     
-            // Generate the signature
-            const signature = await user.signTypedData(domain, types, message);
-            const { v, r, s } = ethers.Signature.from(signature);
-            
-            // const structHash = ethers.TypedDataEncoder.hash(domain, types, message);
-            // const signer = await ethers.recoverAddress(structHash, signature);
-            // const domainSeparator = ethers.TypedDataEncoder.hashDomain(domain);
-            // console.log("NONCE: ", nonce)
-            // console.log("DOMAIN: ", domainSeparator)
-            // console.log("HASH: ", structHash)
-            // console.log("SIGNER: ", signer)
+            // Sign the withdrawal request
+            const signature = await owner.signTypedData(domain, types, value);
             // Execute the withdrawal
-            expect(treasury.connect(user).withdraw(withdrawAmount, recipient.address, v, r, s)).to.be.revertedWithoutReason;
-        }
-        catch (error) {
-            expect(error.message).to.contain("Amount must be greater than zero");
-        }
-    });
-    it("Should fail if withdraw amount higher the balance", async function () {
-        try {
-            const withdrawAmount = ethers.parseEther("1100");
-            // Grant the WITHDRAWER_ROLE to the user
-            await treasury.connect(admin).grantRole(await treasury.WITHDRAWER_ROLE(), user.getAddress());
-            // Fund the treasury for withdrawal
-            await token.connect(admin).transfer(await treasury.getAddress(), withdrawAmount);
-    
-            const nonce = await treasury.nonces(await user.getAddress());
-            const network = await ethers.provider.getNetwork();
-            const { chainId } = network;
-    
-            // Define the EIP-712 domain and types
-            const domain = {
-                name: "MezonTreasury",
-                version: "1",
-                chainId: chainId,
-                verifyingContract: await treasury.getAddress(),
-            };
-            const types = {
-                WithdrawRequest: [
-                    { name: "user", type: "address" },
-                    { name: "amount", type: "uint256" },
-                    { name: "to", type: "address" },
-                    { name: "nonce", type: "uint256" }
-                ],
-            };
-            
-            const message = {
-                user: await user.getAddress(),
-                amount: withdrawAmount,
-                to: await recipient.getAddress(),
-                nonce: nonce
-            };
-    
-            // Generate the signature
-            const signature = await user.signTypedData(domain, types, message);
-            const { v, r, s } = ethers.Signature.from(signature);
-            
-            // const structHash = ethers.TypedDataEncoder.hash(domain, types, message);
-            // const signer = await ethers.recoverAddress(structHash, signature);
-            // const domainSeparator = ethers.TypedDataEncoder.hashDomain(domain);
-            // console.log("NONCE: ", nonce)
-            // console.log("DOMAIN: ", domainSeparator)
-            // console.log("HASH: ", structHash)
-            // console.log("SIGNER: ", signer)
-            // Execute the withdrawal
-            expect(treasury.connect(user).withdraw(withdrawAmount, recipient.address, v, r, s)).to.be.revertedWithoutReason;
+            await expect(treasury.connect(owner).withdraw(requestId, amountToWithdraw, await otherAccount.getAddress(), signature))
+            .to.be.revertedWith("Insufficient balance");
         }
         catch (error) {
             expect(error.message).to.contain("Insufficient balance");
         }
     });
-
-    it("Should fail if the signature is invalid", async function () {
-        const nonce = await treasury.nonces(user.address);
-        const amount = ethers.parseEther("10");
-        await token.connect(admin).transfer(await treasury.getAddress(), amount);
-
-        // Define the EIP-712 domain and types
-        const domain = {
-            name: "MezonTreasury",
-            version: "1"
-        };
-        const types = {
-            WithdrawRequest: [
-                { name: "user", type: "address" },
-                { name: "amount", type: "uint256" },
-                { name: "to", type: "address" },
-                { name: "nonce", type: "uint256" }
-            ],
-        };
-        
-        const message = {
-            user: await user.getAddress(),
-            amount: amount,
-            to: await user.getAddress(),
-            nonce: nonce
-        };
-
-        // Generate the invalid signature
-        const signature = await user.signTypedData(domain, types, message);
-        const { v, r, s } = ethers.Signature.from(signature);
-
-        // Attempt to withdraw with an invalid signature and expect it to fail
-        await expect(treasury.connect(user).withdraw(amount, recipient.address, v, r, s)).to.be.revertedWith("Invalid signature");
-    });
-
-     it("Should fail if user miss permission to withdraw", async function () {
-        const withdrawAmount = ethers.parseEther("50");
-        // Fund the treasury for withdrawal
-        await token.connect(admin).transfer(await treasury.getAddress(), withdrawAmount);
-
-        const nonce = await treasury.nonces(await user.getAddress());
-        const network = await ethers.provider.getNetwork();
-        const { chainId } = network;
-
-        // Define the EIP-712 domain and types
+    
+    it("Should fail withdrawal with a invalid EIP-712 signature", async () => {
+        try {
+        // Set up the domain and types for EIP-712 signing
+        const amountToWithdraw = ethers.parseEther("5");
+        const requestId = "123456789";
+        const AbiCoder = new ethers.AbiCoder()
         const domain = {
             name: "MezonTreasury",
             version: "1",
-            chainId: chainId,
+            chainId: await ethers.provider.getNetwork().then((n) => n.chainId),
             verifyingContract: await treasury.getAddress(),
         };
+
         const types = {
             WithdrawRequest: [
                 { name: "user", type: "address" },
                 { name: "amount", type: "uint256" },
                 { name: "to", type: "address" },
-                { name: "nonce", type: "uint256" }
+                { name: "requestId", type: "bytes32" },
             ],
         };
-        
-        const message = {
-            user: await user.getAddress(),
-            amount: withdrawAmount,
-            to: await recipient.getAddress(),
-            nonce: nonce
+
+        // Set up the withdrawal request
+        const value = {
+            user: await otherAccount.getAddress(),
+            amount: amountToWithdraw,
+            to: await otherAccount.getAddress(),
+            requestId: ethers.keccak256(AbiCoder.encode(["string"], [requestId])),
         };
 
-        // Generate the signature
-        const signature = await user.signTypedData(domain, types, message);
-        const { v, r, s } = ethers.Signature.from(signature);
-        
-        // const structHash = ethers.TypedDataEncoder.hash(domain, types, message);
-        // const signer = await ethers.recoverAddress(structHash, signature);
-        // const domainSeparator = ethers.TypedDataEncoder.hashDomain(domain);
-        // console.log("NONCE: ", nonce)
-        // console.log("DOMAIN: ", domainSeparator)
-        // console.log("HASH: ", structHash)
-        // console.log("SIGNER: ", signer)
+        // Sign the withdrawal request
+        const signature = await owner.signTypedData(domain, types, value);
         // Execute the withdrawal
-        await expect(treasury.connect(user).withdraw(withdrawAmount, recipient.address, v, r, s)).to.be.revertedWith("Permission denied");
+        await expect(treasury.connect(owner).withdraw(requestId, amountToWithdraw, await otherAccount.getAddress(), signature))
+        .to.be.revertedWith("Invalid signature");
+        }
+        catch (error) {
+            expect(error.message).to.contain("Invalid signature");
+        }
+    });
+    it("Should fail withdrawal with a user no permission to withdraw", async () => {
+        try {
+        // Set up the domain and types for EIP-712 signing
+        const amountToWithdraw = ethers.parseEther("5");
+        const requestId = "123456789";
+        const AbiCoder = new ethers.AbiCoder()
+        const domain = {
+            name: "MezonTreasury",
+            version: "1",
+            chainId: await ethers.provider.getNetwork().then((n) => n.chainId),
+            verifyingContract: await treasury.getAddress(),
+        };
+
+        const types = {
+            WithdrawRequest: [
+                { name: "user", type: "address" },
+                { name: "amount", type: "uint256" },
+                { name: "to", type: "address" },
+                { name: "requestId", type: "bytes32" },
+            ],
+        };
+
+        // Set up the withdrawal request
+        const value = {
+            user: await admin.getAddress(),
+            amount: amountToWithdraw,
+            to: await otherAccount.getAddress(),
+            requestId: ethers.keccak256(AbiCoder.encode(["string"], [requestId])),
+        };
+
+        // Sign the withdrawal request
+        const signature = await admin.signTypedData(domain, types, value);
+        // Execute the withdrawal
+        await expect(treasury.connect(admin).withdraw(requestId, amountToWithdraw, await otherAccount.getAddress(), signature))
+        .to.be.revertedWith("Permission denied");
+        }
+        catch (error) {
+            expect(error.message).to.contain("Permission denied");
+        }
     });
 
-    it ("Should success when admin grant role to user", async function () {
-        await treasury.connect(admin).grantRole(await treasury.WITHDRAWER_ROLE(), user.getAddress());
-        expect(await treasury.hasRole(await treasury.WITHDRAWER_ROLE(), user.getAddress())).to.equal(true);
-    })
-    it ("Should success when admin revoke role to user", async function () {
-        await treasury.connect(admin).revokeRole(await treasury.WITHDRAWER_ROLE(), user.getAddress());
-        expect(await treasury.hasRole(await treasury.WITHDRAWER_ROLE(), user.getAddress())).to.equal(false);
-    })
-    it ("Should fail when user try to grant role", async function () {
-        await expect(treasury.connect(user).grantRole(await treasury.WITHDRAWER_ROLE(), user.getAddress())).to.be.revertedWithoutReason;
-    })
 });

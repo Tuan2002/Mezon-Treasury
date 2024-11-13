@@ -2,7 +2,7 @@
 `MezonTreasury` is a Solidity smart contract designed as a secure treasury system for ERC20 tokens. It enables authorized users to deposit and withdraw tokens with EIP-712 signature authorization, allowing flexible and 
 permissioned asset management.
 
-`Mezon` is open-source project that maintain by [NCC Software Vietnam] (https://ncc.asia/)
+`Mezon` is open-source project that maintain by [NCC Software Vietnam](https://ncc.asia/)
 ## Features 
  
 - **Deposit and Withdraw ERC20 Tokens** : Users can deposit tokens, and authorized users can withdraw tokens to specified addresses.
